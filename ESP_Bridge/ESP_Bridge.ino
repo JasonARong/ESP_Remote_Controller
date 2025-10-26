@@ -5,30 +5,46 @@
 
 USBHIDMouse Mouse;
 
-// ⚠️ CRITICAL: Use proper 128-bit UUIDs (must match your Swift app!)
 #define SERVICE_UUID        "00001234-0000-1000-8000-00805f9b34fb"
 #define CHARACTERISTIC_UUID "0000abcd-0000-1000-8000-00805f9b34fb"
 
-BLEServer* pServer = nullptr;
-BLEService* pService = nullptr;
-BLECharacteristic* pChar = nullptr;
+NimBLEServer* pServer = nullptr;
+NimBLEService* pService = nullptr;
+NimBLECharacteristic* pChar = nullptr;
 
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 
 /*** --- BLE Write Callback --- ***/
 class MouseMoveCallback : public NimBLECharacteristicCallbacks {
+  uint8_t lastButtonState;  // remember previous button state
+
   void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) {
     std::string value = pCharacteristic->getValue();
-    
-    if (value.length() == 4) {
-      int16_t dx = (int16_t)((uint8_t)value[0] | ((uint8_t)value[1] << 8));
-      int16_t dy = (int16_t)((uint8_t)value[2] | ((uint8_t)value[3] << 8));
-      Serial.printf("Received dx=%d dy=%d\n", dx, dy);
-      Mouse.move(dx, dy);
-    } else {
-      Serial.printf("⚠️ Got %d bytes (expected 4)\n", value.length());
+    if (value.length() != 6) {
+      Serial.printf("⚠️ Got %d bytes (expected 6)\n", value.length());
+      return;
     }
+
+    const uint8_t* data = (const uint8_t*)value.data();
+    uint8_t buttonState = data[0];
+    // uint8_t reserved = data[1]; // (not used yet)
+    int16_t dx = (int16_t)(data[2] | (data[3] << 8));
+    int16_t dy = (int16_t)(data[4] | (data[5] << 8));
+    
+    Mouse.move(dx, dy);
+
+    bool prevLeft = (lastButtonState & 0x01);
+    bool currLeft = (buttonState & 0x01);
+
+    if (currLeft && !prevLeft) {
+      Mouse.press(MOUSE_LEFT);
+    } else if (!currLeft && prevLeft) {
+      Mouse.release(MOUSE_LEFT);
+    }
+
+    lastButtonState = buttonState;
+    Serial.printf("Received dx=%d dy=%d buttonState=%d\n", dx, dy, buttonState);
   }
 };
 
@@ -78,45 +94,31 @@ void setup() {
   Serial.println("🔧 Initializing NimBLE...");
   
   NimBLEDevice::init("ESP_MouseBridge");
+  NimBLEDevice::setMTU(247); // MTU (Maximum Transmission Unit), sets max BLE packet size
+  NimBLEDevice::setPower(ESP_PWR_LVL_P6); // Power level, P9 is max, but P6 often more stable
+  NimBLEDevice::setSecurityAuth(false, false, true); // false = each reconnection is a new session, false = No PIN comparison required, true = optional encryption
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT); // Fully automatic pairing
   
-  // Set MTU (iOS typically uses 185)
-  NimBLEDevice::setMTU(247);
-  
-  // Set power level - P9 is max, but P6 often more stable
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-  
-  // Disable security for easier connection (re-enable if you need security)
-  NimBLEDevice::setSecurityAuth(false, false, true);
-  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
-  
-  // Create server
+  // Create SERVER
   pServer = NimBLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
-  
-  // Create service
+  // Create SERVICE
   pService = pServer->createService(SERVICE_UUID);
-  
-  // Create characteristic with both WRITE types for flexibility
-  pChar = pService->createCharacteristic(
-    CHARACTERISTIC_UUID,
-    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
-  );
+  // Create CHARACTERISTIC
+  pChar = pService->createCharacteristic(CHARACTERISTIC_UUID, NIMBLE_PROPERTY::WRITE_NR);
   pChar->setCallbacks(new MouseMoveCallback());
   
-  // Start service
   pService->start();
   
+
   // Configure advertising
   NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
-  
-  // iOS-friendly advertising parameters (intervals in 0.625ms units)
-  pAdvertising->setMinInterval(32);  // 20ms
-  pAdvertising->setMaxInterval(244); // 152.5ms
-  
-  // Start advertising
+  pAdvertising->setMinInterval(32);  // (32*0.625ms = 20ms) iOS-friendly 
+  pAdvertising->setMaxInterval(244); // (244*0.625ms = 152.5ms) iOS-friendly
   pAdvertising->start();
   
+
   Serial.println("✅ BLE advertising started");
   Serial.println("📱 Ready for iPhone connection");
   Serial.println("🎧 Listening for writes...");
