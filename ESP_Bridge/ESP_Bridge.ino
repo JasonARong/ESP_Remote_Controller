@@ -27,23 +27,37 @@ class MouseMoveCallback : public NimBLECharacteristicCallbacks {
     }
 
     const uint8_t* data = (const uint8_t*)value.data();
-    uint8_t buttonState = data[0];
-    // uint8_t reserved = data[1]; // (not used yet)
-    int16_t dx = (int16_t)(data[2] | (data[3] << 8));
-    int16_t dy = (int16_t)(data[4] | (data[5] << 8));
-    
-    Mouse.move(dx, dy);
 
+    // Mouse left & right click
+    uint8_t buttonState = data[0];
+    
+    // Left button (bit0)
     bool prevLeft = (lastButtonState & 0x01);
     bool currLeft = (buttonState & 0x01);
-
     if (currLeft && !prevLeft) {
       Mouse.press(MOUSE_LEFT);
     } else if (!currLeft && prevLeft) {
       Mouse.release(MOUSE_LEFT);
     }
 
+    // Right button (bit1)
+    bool prevRight = (lastButtonState & 0x02);
+    bool currRight = (buttonState & 0x02);
+    if (currRight && !prevRight) {
+      Mouse.press(MOUSE_RIGHT);
+    } else if (!currRight && prevRight) {
+      Mouse.release(MOUSE_RIGHT);
+    }
+
     lastButtonState = buttonState;
+
+    // uint8_t reserved = data[1]; // (not used yet)
+    
+    // Mouse Movement
+    int16_t dx = (int16_t)(data[2] | (data[3] << 8));
+    int16_t dy = (int16_t)(data[4] | (data[5] << 8));    
+    Mouse.move(dx, dy);
+
     Serial.printf("Received dx=%d dy=%d buttonState=%d\n", dx, dy, buttonState);
   }
 };
