@@ -1,9 +1,11 @@
 #include <Arduino.h>
 #include <USB.h>
 #include <USBHID.h>
+#include <USBHIDKeyboard.h>
 #include <NimBLEDevice.h>
 
 USBHID HID;
+USBHIDKeyboard Keyboard;
 
 #define SERVICE_UUID        "00001234-0000-1000-8000-00805f9b34fb"
 #define CHARACTERISTIC_UUID "0000abcd-0000-1000-8000-00805f9b34fb"
@@ -15,13 +17,15 @@ NimBLECharacteristic* pChar = nullptr;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 
-/************** CUSTOM HID DESCRIPTOR **************/
+
+/************** CUSTOM HID MOUSE DESCRIPTOR **************/
 // Standard Mouse with 2 buttons + X/Y movement + Wheel
 // Expandable for future enhancements (horizontal scroll, more buttons, etc.)
 static const uint8_t MOUSE_REPORT_DESCRIPTOR[] = {
   0x05, 0x01,        // Usage Page (Generic Desktop)
   0x09, 0x02,        // Usage (Mouse)
   0xA1, 0x01,        // Collection (Application)
+    0x85, HID_REPORT_ID_MOUSE, //   Report ID (mouse)
   
     0x09, 0x01,        //   Usage (Pointer)
     0xA1, 0x00,        //   Collection (Physical)
@@ -90,7 +94,8 @@ public:
 
   // Send mouse report
   bool sendReport() {
-    return HID.SendReport(0, &mouseReport, sizeof(mouseReport));
+    // Send using the mouse report ID so the host can route it correctly
+    return HID.SendReport(HID_REPORT_ID_MOUSE, &mouseReport, sizeof(mouseReport));
   }
 
   // Individual control methods (for future use)
@@ -112,6 +117,7 @@ public:
   }
 };
 
+// Custom Mouse Device
 CustomMouseDevice Mouse;
 
 /************** BLE CALLBACKS **************/
@@ -120,12 +126,28 @@ class MouseMoveCallback : public NimBLECharacteristicCallbacks {
 
   void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) {
     std::string value = pCharacteristic->getValue();
+    const uint8_t* data = (const uint8_t*)value.data();
+    size_t len = value.length();
+
+    if (len == 0) return;
+
+    // ----- Keyboard path -----
+    // Keyboard combo packets: [0xF1, N, keyId1, keyId2, keyId3]
+    if (data[0] == 0xF1 && len >= 2) {
+      Serial.println("Keyboard path");
+      uint8_t count = data[1];
+      size_t available = (len >= 2) ? (len - 2) : 0;
+      size_t n = std::min<size_t>(available, count);
+      handleKeyboardCombo(data + 2, n);
+      return;
+    }
+
+    // ----- Mouse path -----
+    // Mouse packets: [buttons, Scroll, dxLE(1), dxLE(2), dyLE(1), dyLE(2)] 
     if (value.length() != 6) {
       Serial.printf("⚠️ Got %d bytes (expected 6)\n", value.length());
       return;
     }
-
-    const uint8_t* data = (const uint8_t*)value.data();
 
     // Parse button state
     uint8_t buttonState = data[0];
@@ -161,6 +183,58 @@ class MouseMoveCallback : public NimBLECharacteristicCallbacks {
     if (dx != 0 || dy != 0 || wheelDelta != 0 || buttonChanged) {
       Serial.printf("📊 dx=%d dy=%d buttons=%d wheel=%d\n", 
                     dx, dy, buttonState, wheelDelta);
+    }
+  }
+
+  // Handle keyboard combo packet
+  void handleKeyboardCombo(const uint8_t* keyIds, size_t count) {
+    if (count == 0) {
+      Serial.println("ℹ️ Keyboard combo with 0 keys");
+      return;
+    }
+
+    Serial.print("🎹 Keyboard combo: ");
+    for (size_t i = 0; i < count; ++i) {
+      Serial.printf("%u ", keyIds[i]);
+    }
+    Serial.println();
+
+    // Press all keys
+    for (size_t i = 0; i < count; ++i) {
+      pressLogicalKey(keyIds[i], /*pressed=*/true);
+    }
+
+    // Short hold, then release
+    delay(5);
+    Keyboard.releaseAll();
+  }
+
+  // Map your LogicalKey IDs → HID keycodes (macOS mapping for now)
+  void pressLogicalKey(uint8_t id, bool pressed) {
+    uint8_t keycode = 0;
+
+    switch (id) {
+      // Must match iOS LogicalKey rawValues:
+      // control=1, shift=2, alt=3, command=4, arrows=10..13
+      case 1: keycode = KEY_LEFT_CTRL; break;
+      case 2: keycode = KEY_LEFT_SHIFT; break;
+      case 3: keycode = KEY_LEFT_ALT; break;
+      case 4: keycode = KEY_LEFT_GUI; break;  // Command on Mac / Win key on Windows
+
+      case 10: keycode = KEY_LEFT_ARROW;  break;
+      case 11: keycode = KEY_RIGHT_ARROW; break;
+      case 12: keycode = KEY_UP_ARROW;    break;
+      case 13: keycode = KEY_DOWN_ARROW;  break;
+
+      default:
+        Serial.printf("⚠️ Unknown logical key id: %u\n", id);
+        return;
+    }
+
+    if (pressed) {
+      Keyboard.press(keycode);
+    } else {
+      Keyboard.release(keycode);
     }
   }
 };
@@ -210,8 +284,9 @@ void setup() {
   // Add custom mouse device (Mouse is already initialized as global object)
   HID.addDevice(&Mouse, sizeof(MOUSE_REPORT_DESCRIPTOR));
   
-  // Start USB
+  // Start USB: initialize HID, keyboard, then the USB stack
   HID.begin();
+  Keyboard.begin();
   USB.begin();
   
   Serial.println("✅ Custom USB HID Mouse initialized");  
